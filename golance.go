@@ -1,20 +1,38 @@
 package main
 
 import (
+	"bufio"
 	"fmt"
 	"net"
+	"strings"
 )
+
+type header_t struct {
+	requestType string
+	path        string
+	httpVersion string
+}
 
 func handleConnection(conn net.Conn) {
 	defer conn.Close()
-	buf := make([]byte, 1024)
-	_, err := conn.Read(buf)
+	reader := bufio.NewReader(conn)
+
+	requestLine, err := reader.ReadString('\n')
 	if err != nil {
-		fmt.Println(err)
+		return
+	}
+	words := strings.Fields(requestLine)
+
+	if len(words) < 3 {
 		return
 	}
 
-	fmt.Printf("Received: %s", buf)
+	var header header_t
+	header.requestType = words[0]
+	header.path = words[1]
+	header.httpVersion = words[2]
+
+	fmt.Println(header)
 }
 
 func main() {
@@ -23,6 +41,8 @@ func main() {
 		fmt.Println(err)
 		return
 	}
+	defer ln.Close()
+	fmt.Println("listen on port 8080")
 
 	for {
 		conn, err := ln.Accept()
