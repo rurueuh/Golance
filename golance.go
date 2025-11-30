@@ -3,7 +3,10 @@ package main
 import (
 	"bufio"
 	"fmt"
+	"io"
+	"math/rand/v2"
 	"net"
+	"strconv"
 	"strings"
 )
 
@@ -18,7 +21,8 @@ type header_t struct {
 	Connection string
 }
 
-func sendRequest(header header_t) {
+func sendRequest(header header_t, client net.Conn, backendIndex int, setCookie bool) {
+	defer client.Close()
 	ipToSend := fmt.Sprintf("%s:80", header.Host)
 	conn, err := net.Dial("tcp", ipToSend)
 	if err != nil {
@@ -26,6 +30,7 @@ func sendRequest(header header_t) {
 		return
 	}
 	defer conn.Close()
+	fmt.Printf("request : %s goto %s\n", header.Path, header.Host)
 	requestString := fmt.Sprintf(
 		"%s %s %s\r\n"+
 			"Host: %s\r\n"+
@@ -33,7 +38,6 @@ func sendRequest(header header_t) {
 			"Accept: %s\r\n"+
 			"Connection: %s\r\n"+
 			"\r\n",
-
 		header.RequestType, header.Path, header.HTTPVersion,
 		header.Host,
 		header.UserAgent,
@@ -41,25 +45,48 @@ func sendRequest(header header_t) {
 		header.Connection,
 	)
 
-	fmt.Printf("data send: %s", requestString)
-
 	_, err = conn.Write([]byte(requestString))
 	if err != nil {
 		fmt.Println(err)
 		return
 	}
 
-	buffer := make([]byte, 10240)
-	_, err = conn.Read(buffer)
+	reader := bufio.NewReader(conn)
+
+	var headerBuffer strings.Builder
+	var isHeaderEnd bool
+	for {
+		line, err := reader.ReadString('\n')
+		if err != nil {
+			break
+		}
+
+		if line == "\r\n" || line == "\n" {
+			isHeaderEnd = true
+			headerBuffer.WriteString(line)
+			break
+		}
+		headerBuffer.WriteString(line)
+	}
+
+	reponseHeader := headerBuffer.String()
+	if setCookie && isHeaderEnd {
+		fle := strings.Index(reponseHeader, "\r\n")
+		if fle != -1 {
+			cookieHeader := fmt.Sprintf("Set-Cookie: LB_NODE=%d; PATH=/; Max-Age=60\r\n", backendIndex)
+			newResponse := reponseHeader[:fle+2] + cookieHeader + reponseHeader[fle+2:]
+			client.Write([]byte(newResponse))
+		}
+	} else {
+		client.Write([]byte(reponseHeader))
+	}
+	_, err = io.Copy(client, reader)
 	if err != nil {
-		fmt.Println(err)
 		return
 	}
-	fmt.Printf("data: %s", buffer)
 }
 
-func handleConnection(conn net.Conn) {
-	defer conn.Close()
+func handleConnection(conn net.Conn, backends []string) {
 	reader := bufio.NewReader(conn)
 
 	requestLine, err := reader.ReadString('\n')
@@ -72,6 +99,37 @@ func handleConnection(conn net.Conn) {
 		return
 	}
 
+	var selectedIndex int
+	foundCookie := false
+
+	for {
+		line, err := reader.ReadString('\n')
+		if err != nil || line == "\r\n" || line == "\n" {
+			break
+		}
+		if strings.HasPrefix(line, "Cookie:") {
+			if strings.Contains(line, "LB_NODE=") {
+				parts := strings.Split(line, "LB_NODE=")
+				if len(parts) > 1 {
+					valStr := strings.Split(parts[1], ";")[0]
+					valStr = strings.TrimSpace(valStr)
+
+					idx, err := strconv.Atoi(valStr)
+					if err == nil && idx >= 0 && idx < len(backends) {
+						selectedIndex = idx
+						foundCookie = true
+					}
+				}
+			}
+		}
+	}
+
+	setCookie := false
+	if !foundCookie {
+		selectedIndex = rand.IntN(len(backends))
+		setCookie = true
+	}
+
 	var header header_t
 	header.RequestType = words[0]
 	header.Path = words[1]
@@ -79,12 +137,10 @@ func handleConnection(conn net.Conn) {
 
 	header.UserAgent = "GoLanceProxy"
 	header.Accept = "*/*"
-	header.Connection = "keep-alive"
-	header.Host = "example.com"
+	header.Connection = "close"
+	header.Host = backends[selectedIndex]
 
-	sendRequest(header)
-
-	fmt.Println(header)
+	go sendRequest(header, conn, selectedIndex, setCookie)
 }
 
 func main() {
@@ -96,12 +152,19 @@ func main() {
 	defer ln.Close()
 	fmt.Println("listen on port 8080")
 
+	backends := []string{
+		"example.com",
+		"httpforever.com",
+		"192.168.1.254",
+	}
+
 	for {
 		conn, err := ln.Accept()
 		if err != nil {
 			println(err)
 			continue
 		}
-		go handleConnection(conn)
+
+		go handleConnection(conn, backends)
 	}
 }
