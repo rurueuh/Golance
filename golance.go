@@ -8,9 +8,54 @@ import (
 )
 
 type header_t struct {
-	requestType string
-	path        string
-	httpVersion string
+	RequestType string
+	Path        string
+	HTTPVersion string
+
+	UserAgent  string
+	Host       string
+	Accept     string
+	Connection string
+}
+
+func sendRequest(header header_t) {
+	ipToSend := fmt.Sprintf("%s:80", header.Host)
+	conn, err := net.Dial("tcp", ipToSend)
+	if err != nil {
+		fmt.Println("Error:", err)
+		return
+	}
+	defer conn.Close()
+	requestString := fmt.Sprintf(
+		"%s %s %s\r\n"+
+			"Host: %s\r\n"+
+			"User-Agent: %s\r\n"+
+			"Accept: %s\r\n"+
+			"Connection: %s\r\n"+
+			"\r\n",
+
+		header.RequestType, header.Path, header.HTTPVersion,
+		header.Host,
+		header.UserAgent,
+		header.Accept,
+		header.Connection,
+	)
+
+	fmt.Printf("data send: %s", requestString)
+
+	_, err = conn.Write([]byte(requestString))
+	if err != nil {
+		fmt.Println(err)
+		return
+	}
+
+	buffer := make([]byte, 10240)
+	_, err = conn.Read(buffer)
+	if err != nil {
+		fmt.Println(err)
+		return
+	}
+	fmt.Printf("data: %s", buffer)
 }
 
 func handleConnection(conn net.Conn) {
@@ -28,9 +73,16 @@ func handleConnection(conn net.Conn) {
 	}
 
 	var header header_t
-	header.requestType = words[0]
-	header.path = words[1]
-	header.httpVersion = words[2]
+	header.RequestType = words[0]
+	header.Path = words[1]
+	header.HTTPVersion = words[2]
+
+	header.UserAgent = "GoLanceProxy"
+	header.Accept = "*/*"
+	header.Connection = "keep-alive"
+	header.Host = "example.com"
+
+	sendRequest(header)
 
 	fmt.Println(header)
 }
