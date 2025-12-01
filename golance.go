@@ -2,15 +2,18 @@ package main
 
 import (
 	"bufio"
+	"crypto/tls"
 	"fmt"
 	"io"
+	"log"
 	"math/rand/v2"
 	"net"
 	"strconv"
 	"strings"
+	"sync"
 )
 
-type header_t struct {
+type Header struct {
 	RequestType string
 	Path        string
 	HTTPVersion string
@@ -21,16 +24,48 @@ type header_t struct {
 	Connection string
 }
 
-func sendRequest(header header_t, client net.Conn, backendIndex int, setCookie bool) {
+type Backend struct {
+	Address string
+	IsHTTPS bool
+}
+
+var backends = []Backend{
+	{Address: "example.com:443", IsHTTPS: true},
+	{Address: "rurueuh.fr:443", IsHTTPS: true},
+}
+
+func getBackendAddress(b Backend) string {
+	if !strings.Contains(b.Address, ":") {
+		port := 80
+		if b.IsHTTPS {
+			port = 443
+		}
+		return fmt.Sprintf("%s:%s", b.Address, port)
+	}
+	return b.Address
+}
+
+func sendRequest(header Header, client net.Conn, backendIndex int, setCookie bool, backend Backend) {
 	defer client.Close()
-	ipToSend := fmt.Sprintf("%s:80", header.Host)
-	conn, err := net.Dial("tcp", ipToSend)
+
+	address := getBackendAddress(backend)
+
+	var conn net.Conn
+	var err error
+
+	if backend.IsHTTPS {
+		conf := &tls.Config{
+			InsecureSkipVerify: true,
+		}
+		conn, err = tls.Dial("tcp", address, conf)
+	} else {
+		conn, err = net.Dial("tcp", address)
+	}
 	if err != nil {
-		fmt.Println("Error:", err)
+		log.Printf("error : %v", err)
 		return
 	}
 	defer conn.Close()
-	fmt.Printf("request : %s goto %s\n", header.Path, header.Host)
 	requestString := fmt.Sprintf(
 		"%s %s %s\r\n"+
 			"Host: %s\r\n"+
@@ -52,7 +87,6 @@ func sendRequest(header header_t, client net.Conn, backendIndex int, setCookie b
 	}
 
 	reader := bufio.NewReader(conn)
-
 	var headerBuffer strings.Builder
 	var isHeaderEnd bool
 	for {
@@ -69,16 +103,18 @@ func sendRequest(header header_t, client net.Conn, backendIndex int, setCookie b
 		headerBuffer.WriteString(line)
 	}
 
-	reponseHeader := headerBuffer.String()
+	responseHeader := headerBuffer.String()
 	if setCookie && isHeaderEnd {
-		fle := strings.Index(reponseHeader, "\r\n")
+		fle := strings.Index(responseHeader, "\r\n")
 		if fle != -1 {
 			cookieHeader := fmt.Sprintf("Set-Cookie: LB_NODE=%d; PATH=/; Max-Age=60\r\n", backendIndex)
-			newResponse := reponseHeader[:fle+2] + cookieHeader + reponseHeader[fle+2:]
+			newResponse := responseHeader[:fle+2] + cookieHeader + responseHeader[fle+2:]
 			client.Write([]byte(newResponse))
+		} else {
+			client.Write([]byte(responseHeader))
 		}
 	} else {
-		client.Write([]byte(reponseHeader))
+		client.Write([]byte(responseHeader))
 	}
 	_, err = io.Copy(client, reader)
 	if err != nil {
@@ -86,27 +122,29 @@ func sendRequest(header header_t, client net.Conn, backendIndex int, setCookie b
 	}
 }
 
-func handleConnection(conn net.Conn, backends []string) {
-	reader := bufio.NewReader(conn)
-
+func headerParser(reader *bufio.Reader) (Header, int, bool, error) {
 	requestLine, err := reader.ReadString('\n')
 	if err != nil {
-		return
+		return Header{}, 0, false, err
 	}
 	words := strings.Fields(requestLine)
-
 	if len(words) < 3 {
-		return
+		return Header{}, 0, false, fmt.Errorf("bad http format")
 	}
 
 	var selectedIndex int
 	foundCookie := false
 
+	var currentHeader strings.Builder
+	currentHeader.WriteString(requestLine)
+
 	for {
 		line, err := reader.ReadString('\n')
 		if err != nil || line == "\r\n" || line == "\n" {
+			currentHeader.WriteString(line)
 			break
 		}
+		currentHeader.WriteString(line)
 		if strings.HasPrefix(line, "Cookie:") {
 			if strings.Contains(line, "LB_NODE=") {
 				parts := strings.Split(line, "LB_NODE=")
@@ -130,7 +168,7 @@ func handleConnection(conn net.Conn, backends []string) {
 		setCookie = true
 	}
 
-	var header header_t
+	var header Header
 	header.RequestType = words[0]
 	header.Path = words[1]
 	header.HTTPVersion = words[2]
@@ -138,33 +176,79 @@ func handleConnection(conn net.Conn, backends []string) {
 	header.UserAgent = "GoLanceProxy"
 	header.Accept = "*/*"
 	header.Connection = "close"
-	header.Host = backends[selectedIndex]
+	header.Host = strings.Split(backends[selectedIndex].Address, ":")[0]
 
-	go sendRequest(header, conn, selectedIndex, setCookie)
+	return header, selectedIndex, setCookie, nil
 }
 
-func main() {
-	ln, err := net.Listen("tcp", ":8080")
+func handleConnection(conn net.Conn) {
+	reader := bufio.NewReader(conn)
+
+	header, selectedIndex, setCookie, err := headerParser(reader)
 	if err != nil {
-		fmt.Println(err)
+		conn.Close()
+		return
+	}
+
+	backend := backends[selectedIndex]
+	go sendRequest(header, conn, selectedIndex, setCookie, backend)
+}
+
+func listenHTTP(port string) {
+	ln, err := net.Listen("tcp", port)
+	if err != nil {
+		log.Fatalf("error on open http %s: %v", port, err)
 		return
 	}
 	defer ln.Close()
-	fmt.Println("listen on port 8080")
 
-	backends := []string{
-		"example.com",
-		"httpforever.com",
-		"192.168.1.254",
-	}
-
+	fmt.Println("HTTP server running on port", port)
 	for {
 		conn, err := ln.Accept()
 		if err != nil {
-			println(err)
 			continue
 		}
-
-		go handleConnection(conn, backends)
+		go handleConnection(conn)
 	}
+}
+
+func listenHTTPS(port string) {
+	server, err := tls.LoadX509KeyPair("cert.pem", "key.pem")
+	if err != nil {
+		log.Fatalf("cert.pem or key.pem is invalid : %v", err)
+	}
+
+	config := &tls.Config{Certificates: []tls.Certificate{server}}
+	ln, err := tls.Listen("tcp", port, config)
+	if err != nil {
+		log.Fatalf("error on open https %s: %v", port, err)
+	}
+	defer ln.Close()
+
+	fmt.Println("HTTPS server running on port", port)
+	for {
+		conn, err := ln.Accept()
+		if err != nil {
+			continue
+		}
+		go handleConnection(conn)
+	}
+}
+
+func main() {
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+
+	go func() {
+		defer wg.Done()
+		listenHTTP(":8080")
+	}()
+
+	go func() {
+		defer wg.Done()
+		listenHTTPS(":8443")
+	}()
+
+	wg.Wait()
 }
