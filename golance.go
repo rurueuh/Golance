@@ -6,23 +6,11 @@ import (
 	"fmt"
 	"io"
 	"log"
-	"math/rand/v2"
 	"net"
-	"strconv"
+	"slices"
 	"strings"
 	"sync"
 )
-
-type Header struct {
-	RequestType string
-	Path        string
-	HTTPVersion string
-
-	UserAgent  string
-	Host       string
-	Accept     string
-	Connection string
-}
 
 type Backend struct {
 	Address string
@@ -31,8 +19,11 @@ type Backend struct {
 
 var backends = []Backend{
 	{Address: "example.com:443", IsHTTPS: true},
+	{Address: "example.com:80", IsHTTPS: false},
 	{Address: "rurueuh.fr:443", IsHTTPS: true},
 }
+
+var validateMethod = []string{"OPTIONS", "GET", "HEAD", "POST", "PUT", "DELETE", "TRACE", "CONNECT"}
 
 func getBackendAddress(b Backend) string {
 	if !strings.Contains(b.Address, ":") {
@@ -40,12 +31,22 @@ func getBackendAddress(b Backend) string {
 		if b.IsHTTPS {
 			port = 443
 		}
-		return fmt.Sprintf("%s:%s", b.Address, port)
+		return fmt.Sprintf("%s:%d", b.Address, port)
 	}
 	return b.Address
 }
 
-func sendRequest(header Header, client net.Conn, backendIndex int, setCookie bool, backend Backend) {
+type Request struct {
+	RequestType string
+	Path        string
+	HTTPVersion string
+
+	header map[string]string
+
+	body string
+}
+
+func sendRequest(request Request, client net.Conn, backendIndex int, setCookie bool, backend Backend) {
 	defer client.Close()
 
 	address := getBackendAddress(backend)
@@ -73,11 +74,11 @@ func sendRequest(header Header, client net.Conn, backendIndex int, setCookie boo
 			"Accept: %s\r\n"+
 			"Connection: %s\r\n"+
 			"\r\n",
-		header.RequestType, header.Path, header.HTTPVersion,
-		header.Host,
-		header.UserAgent,
-		header.Accept,
-		header.Connection,
+		request.RequestType, request.Path, request.HTTPVersion,
+		request.header["Host"],
+		request.header["User-Agent"],
+		request.header["Accept"],
+		request.header["Connection"],
 	)
 
 	_, err = conn.Write([]byte(requestString))
@@ -122,76 +123,69 @@ func sendRequest(header Header, client net.Conn, backendIndex int, setCookie boo
 	}
 }
 
-func headerParser(reader *bufio.Reader) (Header, int, bool, error) {
-	requestLine, err := reader.ReadString('\n')
+func handleConnection(conn net.Conn) error {
+	request, err := CreateRequest(conn)
 	if err != nil {
-		return Header{}, 0, false, err
-	}
-	words := strings.Fields(requestLine)
-	if len(words) < 3 {
-		return Header{}, 0, false, fmt.Errorf("bad http format")
+		fmt.Println(err)
+		return err
 	}
 
-	var selectedIndex int
-	foundCookie := false
-
-	var currentHeader strings.Builder
-	currentHeader.WriteString(requestLine)
-
-	for {
-		line, err := reader.ReadString('\n')
-		if err != nil || line == "\r\n" || line == "\n" {
-			currentHeader.WriteString(line)
-			break
+	lbValue := ""
+	cookieHeader := request.header["Cookie"]
+	cookieHeader = strings.TrimSpace(cookieHeader)
+	cookies := strings.SplitSeq(cookieHeader, ";")
+	for v := range cookies {
+		if v == "" {
+			continue
 		}
-		currentHeader.WriteString(line)
-		if strings.HasPrefix(line, "Cookie:") {
-			if strings.Contains(line, "LB_NODE=") {
-				parts := strings.Split(line, "LB_NODE=")
-				if len(parts) > 1 {
-					valStr := strings.Split(parts[1], ";")[0]
-					valStr = strings.TrimSpace(valStr)
-
-					idx, err := strconv.Atoi(valStr)
-					if err == nil && idx >= 0 && idx < len(backends) {
-						selectedIndex = idx
-						foundCookie = true
-					}
-				}
-			}
+		cookie := strings.Split(v, ":")
+		if len(cookie) != 2 {
+			return fmt.Errorf("bad request")
+		}
+		key := cookie[0]
+		fmt.Printf("key %s", key)
+		if key == "LB_GOLANCE" {
+			lbValue = cookie[1]
 		}
 	}
 
-	setCookie := false
-	if !foundCookie {
-		selectedIndex = rand.IntN(len(backends))
-		setCookie = true
-	}
-
-	var header Header
-	header.RequestType = words[0]
-	header.Path = words[1]
-	header.HTTPVersion = words[2]
-
-	header.UserAgent = "GoLanceProxy"
-	header.Accept = "*/*"
-	header.Connection = "close"
-	header.Host = strings.Split(backends[selectedIndex].Address, ":")[0]
-
-	return header, selectedIndex, setCookie, nil
+	// backend := backends[selectedIndex]
+	// go sendRequest(header, conn, selectedIndex, setCookie, backend)
+	return nil
 }
 
-func handleConnection(conn net.Conn) {
-	reader := bufio.NewReader(conn)
+func CreateRequest(conn net.Conn) (Request, error) {
+	var (
+		request Request
+		err     error
+		reader  *bufio.Reader
+	)
 
-	header, selectedIndex, setCookie, err := headerParser(reader)
+	reader = bufio.NewReader(conn)
+
+	firstLine, err := reader.ReadString('\n')
 	if err != nil {
-		conn.Close()
-		return
+		return Request{}, err
+	}
+	firstLineSplit := strings.Split(firstLine, " ")
+	if len(firstLineSplit) != 3 {
+		return Request{}, fmt.Errorf("bad request")
 	}
 
-	backend := backends[selectedIndex]
-	go sendRequest(header, conn, selectedIndex, setCookie, backend)
+	if !slices.Contains(validateMethod, firstLineSplit[0]) {
+		return Request{}, fmt.Errorf("bad request")
+	}
+
+	request.RequestType = firstLineSplit[0]
+	request.Path = firstLineSplit[1]
+	request.HTTPVersion = firstLineSplit[2]
+
+	request.header, err = getHeader(reader)
+	if err != nil {
+		conn.Close()
+		return Request{}, err
+	}
+	return request, nil
 }
 
 func listenHTTP(port string) {
