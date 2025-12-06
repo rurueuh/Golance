@@ -18,6 +18,17 @@ func formatToHTTPForm(key string) string {
 	return caser.String(key)
 }
 
+func headerToString(header map[string]string, stringBuilder *strings.Builder) {
+
+	for v, n := range header {
+		stringBuilder.Write([]byte(v))
+		stringBuilder.Write([]byte(": "))
+		stringBuilder.Write([]byte(n))
+		stringBuilder.Write([]byte("\r\n"))
+	}
+	stringBuilder.Write([]byte("\r\n"))
+}
+
 func getHeader(reader *bufio.Reader) (map[string]string, error) {
 	header := make(map[string]string)
 
@@ -44,11 +55,4 @@ func getHeader(reader *bufio.Reader) (map[string]string, error) {
 
 		header[key] = data
 	}
-}
-
-func rewriteHeader(header map[string]string) {
-	if _, ok := header["Host"]; ok {
-		header["Host"] = "teste"
-	}
-
 }
