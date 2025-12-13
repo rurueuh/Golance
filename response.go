@@ -46,7 +46,6 @@ func sendRequestToBackEnd(request Request, backend Backend, client net.Conn) (ne
 
 	_, err = conn.Write([]byte(requestString))
 	if err != nil {
-		fmt.Println(err)
 		return nil, err
 	}
 	return conn, err
@@ -55,7 +54,7 @@ func sendRequestToBackEnd(request Request, backend Backend, client net.Conn) (ne
 func sendRequest(request Request, client net.Conn, backendIndex int, setCookie bool, backend Backend) {
 	conn, err := sendRequestToBackEnd(request, backend, client)
 	if err != nil {
-		fmt.Println(err)
+		fmt.Println("backend error:", err)
 		return
 	}
 	defer conn.Close()

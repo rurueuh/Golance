@@ -16,6 +16,8 @@ type Backend struct {
 
 var backends = []Backend{
 	{Address: "rurueuh.fr:443", IsHTTPS: true},
+	{Address: "example.com:443", IsHTTPS: true},
+	{Address: "example.com:80", IsHTTPS: false},
 }
 
 var validateMethod = []string{"OPTIONS", "GET", "HEAD", "POST", "PUT", "DELETE", "TRACE", "CONNECT"}
